@@ -1179,7 +1179,7 @@ let S = { date:'', hk1:'', hk2:'', shift:'Morning', startedAt:'', rooms:[], cur:
 let _saveTimer = null;
 const today   = () => new Date().toISOString().split('T')[0];
 const nowTime = () => new Date().toTimeString().slice(0,5);
-const storeKey = d => 'bute-hk-'+(d||S.date).replace(/-/g,'');
+const storeKey = d => 'bute-hk-'+(d||S.date).replace(/-/g,'')+(S&&S.hk1?'-'+S.hk1.toLowerCase().replace(/\s+/g,''):'');
 const hkName  = () => S.hk1 + (S.hk2 ? ' & '+S.hk2 : '');
 
 async function saveState()  { try { await store.set(storeKey(),JSON.stringify(S)); } catch(e) {} }
