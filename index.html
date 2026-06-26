@@ -79,6 +79,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;ba
 .chip.king{background:#FEF3C7;border-color:var(--ambd);color:var(--am)}
 .chip .chip-x{cursor:pointer;opacity:.6;font-size:14px;line-height:1;margin-left:2px}.chip .chip-x:hover{opacity:1}
 .chip-hint{font-size:11px;color:var(--muted);margin-top:4px}
+.dlg-chips{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 2px;max-height:180px;overflow-y:auto}
+.dlg-chip{display:flex;align-items:center;gap:6px;background:var(--nlt);border:2px solid #BFDBF7;border-radius:12px;padding:9px 13px;font:inherit;font-size:15px;font-weight:800;color:var(--navy);cursor:pointer}
+.dlg-chip:active{transform:scale(.96)}
+.dlg-chip .dc-type{font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.3px}
+.dlg-chips-empty{font-size:12px;color:var(--muted);font-style:italic;margin:4px 0 2px}
 .room-db-btn{background:none;border:none;color:var(--navy);font:inherit;font-size:12px;font-weight:700;cursor:pointer;text-decoration:underline;padding:4px 0}
 
 /* STATS */
@@ -485,7 +490,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;ba
 
 <!-- ROOM DIALOG -->
 <div id="dlg" class="dlg" onclick="if(event.target===this)closeDlg()">
-  <div class="dlgb"><h3>Which room are you starting?</h3><input class="big-in" type="text" id="dlgRoomNo" placeholder="e.g. 201" maxlength="6" onkeydown="if(event.key==='Enter')dlgOk()"><div style="font-size:12px;color:var(--muted);margin-top:8px">Start time is recorded automatically.</div><div class="dlg-btns"><button class="dc" onclick="closeDlg()">Cancel</button><button class="dok" onclick="dlgOk()">Start Cleaning →</button></div></div>
+  <div class="dlgb"><h3>Which room are you starting?</h3>
+  <div id="dlgChips" class="dlg-chips"></div>
+  <div id="dlgChipsLabel" style="font-size:12px;color:var(--muted);margin:10px 0 6px;font-weight:700">Or type a room number</div>
+  <input class="big-in" type="text" id="dlgRoomNo" placeholder="e.g. 201" maxlength="6" onkeydown="if(event.key==='Enter')dlgOk()"><div style="font-size:12px;color:var(--muted);margin-top:8px">Start time is recorded automatically.</div><div class="dlg-btns"><button class="dc" onclick="closeDlg()">Cancel</button><button class="dok" onclick="dlgOk()">Start Cleaning →</button></div></div>
 </div>
 
 <div id="toast" class="toast"></div>
@@ -944,7 +952,7 @@ const store = {
    Setup: deploy the companion Apps Script as a Web App, then paste its URL below.
    SYNC_TOKEN must match the SHARED_TOKEN constant in that script.
    This is a SEPARATE tracker sheet from the Handover tool — see SETUP_GUIDE_DAILYLOG.md. */
-const SHEET_API_URL = 'https://script.google.com/macros/s/AKfycby_mH8DE4UDYvraahMCXG6yP4hRGewRJhoVE2VoVexwrGWbx6YT6MacIhhDB5yXGVGl/exec';
+const SHEET_API_URL = 'https://script.google.com/macros/s/AKfycbzo5SY9Tc8OaUg6ncYKw1hFNfKRLHz2F0i9C8sNxJrDDyqxhwxqHgiHc6w_C7oKxYs-/exec';
 const SYNC_TOKEN = 'bute83-2wIvNuAXluJVdvPchwR6miQmgop0';
 const PENDING_KEY = 'bute__pendingSyncDailyLog';
 
@@ -970,14 +978,61 @@ async function pushToSheet(payload) {
   if (!SHEET_API_URL || SHEET_API_URL.indexOf('PASTE_YOUR') !== -1) {
     throw new Error('Master Tracker not configured yet');
   }
-  const res = await fetch(SHEET_API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify(payload)
+  try {
+    const res = await fetch(SHEET_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'Sync failed');
+    return data;
+  } catch (fetchErr) {
+    // fetch() blocked (Safari/CORS/redirect quirks vary by browser) — fall back
+    // to a real form submission into a hidden iframe. Forms predate CORS and
+    // are never subject to it, so this works on every browser unconditionally.
+    return await pushViaHiddenForm(payload);
+  }
+}
+
+function pushViaHiddenForm(payload) {
+  return new Promise((resolve, reject) => {
+    const frameName = 'syncFrame_' + Math.random().toString(36).slice(2);
+    const iframe = document.createElement('iframe');
+    iframe.name = frameName;
+    iframe.style.display = 'none';
+    document.body.appendChild(iframe);
+
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = SHEET_API_URL;
+    form.target = frameName;
+    form.style.display = 'none';
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = 'payload';
+    input.value = JSON.stringify(payload);
+    form.appendChild(input);
+    document.body.appendChild(form);
+
+    let submitted = false, settled = false;
+    const cleanup = () => { try { form.remove(); iframe.remove(); } catch (e) {} };
+    const timer = setTimeout(() => {
+      if (!settled) { settled = true; cleanup(); reject(new Error('No response — check connection')); }
+    }, 15000);
+
+    iframe.addEventListener('load', () => {
+      if (!submitted || settled) return; // ignore the iframe's initial blank-page load
+      settled = true;
+      clearTimeout(timer);
+      cleanup();
+      resolve({ ok: true, viaForm: true });
+    });
+
+    // Small delay so the iframe's own initial "load" (blank page) fires and is
+    // ignored before we submit and start listening for the real response.
+    setTimeout(() => { submitted = true; form.submit(); }, 50);
   });
-  const data = await res.json();
-  if (!data.ok) throw new Error(data.error || 'Sync failed');
-  return data;
 }
 
 function getPending() { try { return JSON.parse(localStorage.getItem(PENDING_KEY) || '[]'); } catch (e) { return []; } }
@@ -1324,8 +1379,30 @@ function renderDash() {
    ============================================================ */
 function openNewRoom() {
   document.getElementById('dlgRoomNo').value = '';
+  renderDlgChips();
   document.getElementById('dlg').classList.add('on');
   setTimeout(() => { try{document.getElementById('dlgRoomNo').focus();}catch(e){} }, 150);
+}
+function renderDlgChips() {
+  const cont = document.getElementById('dlgChips');
+  const label = document.getElementById('dlgChipsLabel');
+  if (!cont) return;
+  const cleanedNos = new Set((S.rooms||[]).map(r=>r.no));
+  const queuedNos = (S.assignedRooms||[]).filter(no => !cleanedNos.has(no));
+  if (!queuedNos.length) {
+    cont.innerHTML = '<div class="dlg-chips-empty">No pre-assigned rooms left to pick from — type a room number below.</div>';
+    if (label) label.style.display = 'none';
+    return;
+  }
+  if (label) label.style.display = '';
+  cont.innerHTML = queuedNos.map(no => {
+    const type = RDB[no] ? (RT[RDB[no].type]?.short || '') : '';
+    return `<button type="button" class="dlg-chip" onclick="dlgPick('${no}')">${no}${type ? ` <span class="dc-type">${type}</span>` : ''}</button>`;
+  }).join('');
+}
+function dlgPick(no) {
+  document.getElementById('dlgRoomNo').value = no;
+  dlgOk();
 }
 function closeDlg() { document.getElementById('dlg').classList.remove('on'); }
 function dlgOk() {
