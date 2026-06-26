@@ -424,7 +424,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;ba
 <!-- ══════════ DASHBOARD ══════════ -->
 <div id="vDash" class="view">
   <div class="ah">
-    <div class="hr"><div><div class="ht" id="dashName"></div><div class="hs" id="dashDate"></div></div><button class="back no-print" onclick="endDay()">Report →</button></div>
+    <div class="hr"><div><div class="ht" id="dashName"></div><div class="hs" id="dashDate"></div></div><div style="display:flex;gap:6px"><button class="back no-print" onclick="openAddRooms()">+ Add Rooms</button><button class="back no-print" onclick="endDay()">Report →</button></div></div>
     <div class="ah-prog"><div class="ah-prog-fill" id="dashProgFill" style="width:0%"></div></div>
   </div>
   <div class="vb">
@@ -456,7 +456,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;ba
     </div>
   </div>
   <div class="vb" id="roomBody"></div>
-  <div class="sb no-print"><button class="btn btn-em" onclick="completeRoom()">✅ Mark Room Complete</button></div>
+  <div class="sb no-print" id="roomActionBar"></div>
 </div>
 
 <!-- ══════════ REPORT ══════════ -->
@@ -494,6 +494,20 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;ba
   <div id="dlgChips" class="dlg-chips"></div>
   <div id="dlgChipsLabel" style="font-size:12px;color:var(--muted);margin:10px 0 6px;font-weight:700">Or type a room number</div>
   <input class="big-in" type="text" id="dlgRoomNo" placeholder="e.g. 201" maxlength="6" onkeydown="if(event.key==='Enter')dlgOk()"><div style="font-size:12px;color:var(--muted);margin-top:8px">Start time is recorded automatically.</div><div class="dlg-btns"><button class="dc" onclick="closeDlg()">Cancel</button><button class="dok" onclick="dlgOk()">Start Cleaning →</button></div></div>
+</div>
+
+<!-- ADD ROOMS MID-SHIFT DIALOG -->
+<div id="dlgAddRooms" class="dlg" onclick="if(event.target===this)closeAddRooms()">
+  <div class="dlgb">
+    <h3>Add more rooms to today</h3>
+    <div class="chip-row">
+      <input type="text" id="addRoomInput" placeholder="e.g. 401" maxlength="6" onkeydown="if(event.key==='Enter'){event.preventDefault();addRoomToBuffer();}">
+      <button class="add-btn" onclick="addRoomToBuffer()">+ Add</button>
+    </div>
+    <div id="addRoomsChips" class="chips"></div>
+    <div style="font-size:12px;color:var(--muted);margin-top:4px">These are added to today's list — nothing already completed is affected.</div>
+    <div class="dlg-btns"><button class="dc" onclick="closeAddRooms()">Cancel</button><button class="dok" id="addRoomsConfirmBtn" onclick="confirmAddRooms()" disabled>Add Rooms</button></div>
+  </div>
 </div>
 
 <div id="toast" class="toast"></div>
@@ -1037,19 +1051,23 @@ function pushViaHiddenForm(payload) {
 
 function getPending() { try { return JSON.parse(localStorage.getItem(PENDING_KEY) || '[]'); } catch (e) { return []; } }
 function setPending(arr) { try { localStorage.setItem(PENDING_KEY, JSON.stringify(arr)); } catch (e) {} }
+function pendingKeyOf(payload) {
+  if (payload.kind === 'day') return payload.dailyLogId;
+  return payload.roomLogId; // 'room' and 'delete_room' both key off roomLogId
+}
 function queuePending(payload) {
-  const key = payload.kind === 'room' ? payload.roomLogId : payload.dailyLogId;
-  const arr = getPending().filter(p => (p.kind === 'room' ? p.roomLogId : p.dailyLogId) !== key);
+  const key = pendingKeyOf(payload);
+  const arr = getPending().filter(p => pendingKeyOf(p) !== key);
   arr.push(payload);
   setPending(arr);
 }
 function clearPending(key) {
-  setPending(getPending().filter(p => (p.kind === 'room' ? p.roomLogId : p.dailyLogId) !== key));
+  setPending(getPending().filter(p => pendingKeyOf(p) !== key));
 }
 async function flushPending() {
   const arr = getPending();
   for (const payload of arr) {
-    try { await pushToSheet(payload); clearPending(payload.kind === 'room' ? payload.roomLogId : payload.dailyLogId); }
+    try { await pushToSheet(payload); clearPending(pendingKeyOf(payload)); }
     catch (e) { /* still offline or not configured — leave queued for next try */ }
   }
 }
@@ -1404,6 +1422,60 @@ function dlgPick(no) {
   document.getElementById('dlgRoomNo').value = no;
   dlgOk();
 }
+
+/* ── ADD ROOMS MID-SHIFT — purely additive: pushes onto S.assignedRooms only.
+   Never touches S.rooms, so already-completed/in-progress work is never at risk. ── */
+let _addRoomsBuffer = [];
+function openAddRooms() {
+  _addRoomsBuffer = [];
+  renderAddRoomsBuffer();
+  document.getElementById('addRoomInput').value = '';
+  document.getElementById('dlgAddRooms').classList.add('on');
+  setTimeout(() => { try{document.getElementById('addRoomInput').focus();}catch(e){} }, 150);
+}
+function closeAddRooms() { document.getElementById('dlgAddRooms').classList.remove('on'); }
+function addRoomToBuffer() {
+  const inp = document.getElementById('addRoomInput');
+  const val = inp.value.trim().toUpperCase();
+  if (!val) return;
+  if ((S.assignedRooms||[]).includes(val)) { toast(`Room ${val} is already on today's list`, 'am'); inp.value=''; return; }
+  if (!_addRoomsBuffer.includes(val)) _addRoomsBuffer.push(val);
+  inp.value = '';
+  renderAddRoomsBuffer();
+  inp.focus();
+}
+function removeFromAddBuffer(no) {
+  _addRoomsBuffer = _addRoomsBuffer.filter(r => r !== no);
+  renderAddRoomsBuffer();
+}
+function renderAddRoomsBuffer() {
+  const cont = document.getElementById('addRoomsChips');
+  const btn = document.getElementById('addRoomsConfirmBtn');
+  if (!_addRoomsBuffer.length) {
+    cont.innerHTML = '';
+    btn.textContent = 'Add Rooms';
+    btn.disabled = true;
+    return;
+  }
+  btn.disabled = false;
+  btn.textContent = `Add ${_addRoomsBuffer.length} Room${_addRoomsBuffer.length!==1?'s':''}`;
+  cont.innerHTML = _addRoomsBuffer.map(no => {
+    const prof = getRoom(no);
+    const type = RT[prof.type]?.short || '?';
+    return `<span class="chip">${no} · ${type}<span class="chip-x" onclick="removeFromAddBuffer('${no}')">×</span></span>`;
+  }).join('');
+}
+function confirmAddRooms() {
+  if (!_addRoomsBuffer.length) return;
+  if (!S.assignedRooms) S.assignedRooms = [];
+  _addRoomsBuffer.forEach(no => { if (!S.assignedRooms.includes(no)) S.assignedRooms.push(no); });
+  const n = _addRoomsBuffer.length;
+  _addRoomsBuffer = [];
+  closeAddRooms();
+  debounceSave();
+  renderDash();
+  toast(`✅ ${n} room${n!==1?'s':''} added to today's list`, 'em');
+}
 function closeDlg() { document.getElementById('dlg').classList.remove('on'); }
 function dlgOk() {
   const no = document.getElementById('dlgRoomNo').value.trim().toUpperCase();
@@ -1436,14 +1508,28 @@ function openRoom(idx) {
     S.cur = idx;
     const r = S.rooms[idx];
     document.getElementById('roomNumDisplay').textContent = r.no;
-    document.getElementById('roomStarted').textContent = 'Started '+r.startTime+(r.endTime?' · Completed '+r.endTime:'');
+    let timeLine = 'Started '+r.startTime+(r.endTime?' · Completed '+r.endTime:'');
+    if (r.editedAt) timeLine += ' · Edited '+r.editedAt;
+    document.getElementById('roomStarted').textContent = timeLine;
     document.getElementById('roomHkName').textContent = r.hk||hkName();
     const rt = RT[r.roomType]||RT[RT_DEFAULT];
     const bIcon = (r.bathroom||'bath') === 'shower' ? '🚿 Shower' : '🛁 Bath';
     document.getElementById('roomTypeBadge').innerHTML = `<span class="room-type-badge">${rt.label} · ${rt.beds} bed${rt.beds>1?'s':''} · ${rt.guests} guest${rt.guests>1?'s':''} · ${bIcon}${rt.sofaBed?' · 🛋️ Sofa Bed':''}</span>`;
     buildRoomView();
+    renderRoomActionBar();
     showView('vRoom');
   } catch(e) { showErr('Could not open room: '+e.message); }
+}
+
+/* Shows "first completion" vs "save changes to an already-finished room" — and always
+   offers Delete, since that's the one thing that was missing entirely before. */
+function renderRoomActionBar() {
+  const r = S.rooms[S.cur];
+  const alreadyDone = r.status === 'complete' || r.status === 'issues';
+  const bar = document.getElementById('roomActionBar');
+  bar.innerHTML = alreadyDone
+    ? `<button class="btn btn-em" onclick="completeRoom()">💾 Save Changes</button><button class="btn btn-sl" style="color:var(--rose);border-color:var(--rose)" onclick="deleteRoomEntry()">🗑 Delete This Room Entry</button>`
+    : `<button class="btn btn-em" onclick="completeRoom()">✅ Mark Room Complete</button><button class="btn btn-sl" style="color:var(--rose);border-color:var(--rose)" onclick="deleteRoomEntry()">🗑 Delete This Room Entry</button>`;
 }
 
 function buildRoomView() {
@@ -1523,16 +1609,45 @@ function goBack() { try{saveState();renderDash();showView('vDash');}catch(e){sho
 function completeRoom() {
   try {
     const r=S.rooms[S.cur];
-    const pending=CL_TOTAL-((r.doneCount||0)+(r.issueCount||0));
-    if(pending>0&&!confirm(`${pending} item${pending!==1?'s':''} not yet checked. Mark room complete anyway?`)) return;
-    r.endTime=nowTime();
-    try{const[sh,sm]=r.startTime.split(':').map(Number);const[eh,em]=r.endTime.split(':').map(Number);r.durMin=Math.max(1,(eh*60+em)-(sh*60+sm));}catch(e){r.durMin=0;}
+    const wasAlreadyDone = r.status === 'complete' || r.status === 'issues';
+    if (!wasAlreadyDone) {
+      const pending=CL_TOTAL-((r.doneCount||0)+(r.issueCount||0));
+      if(pending>0&&!confirm(`${pending} item${pending!==1?'s':''} not yet checked. Mark room complete anyway?`)) return;
+      r.endTime=nowTime();
+      try{const[sh,sm]=r.startTime.split(':').map(Number);const[eh,em]=r.endTime.split(':').map(Number);r.durMin=Math.max(1,(eh*60+em)-(sh*60+sm));}catch(e){r.durMin=0;}
+    } else {
+      // Editing an already-finished room: never touch the original startTime/endTime/durMin —
+      // just stamp that an edit happened, so the original record is never silently lost.
+      r.editedAt = nowTime();
+    }
     try{r.notes=document.getElementById('issNotes')?.value||r.notes||'';}catch(e){}
     r.status=(r.issueCount||0)>0?'issues':'complete';
     S.cur=-1; saveState(); renderDash(); showView('vDash');
-    toast(r.status==='complete'?`✅ Room ${r.no} complete! (${r.durMin} min)`:`⚠️ Room ${r.no} done — ${r.issueCount} issue${r.issueCount!==1?'s':''} flagged`,r.status==='issues'?'am':'em');
+    if (wasAlreadyDone) toast(`✏️ Changes saved for Room ${r.no}`, 'em');
+    else toast(r.status==='complete'?`✅ Room ${r.no} complete! (${r.durMin} min)`:`⚠️ Room ${r.no} done — ${r.issueCount} issue${r.issueCount!==1?'s':''} flagged`,r.status==='issues'?'am':'em');
     autoSyncRoom(r);
   } catch(e) { showErr('Could not complete room: '+e.message); }
+}
+
+/* Removes a room entry entirely — local list AND the cloud tracker, so nothing is left
+   orphaned in the Sheet. Always asks for confirmation since this can't be undone locally
+   (the row stays recoverable in the Sheet's version history if needed). */
+function deleteRoomEntry() {
+  try {
+    const r = S.rooms[S.cur];
+    if (!confirm(`Delete Room ${r.no} from today's log? This can't be undone here.`)) return;
+    const roomLogId = r.roomLogId;
+    S.rooms.splice(S.cur, 1);
+    S.cur = -1;
+    saveState(); renderDash(); showView('vDash');
+    toast(`🗑 Room ${r.no} deleted`, 'am');
+    if (roomLogId) syncDeleteRoom(roomLogId);
+  } catch(e) { showErr('Could not delete room: '+e.message); }
+}
+async function syncDeleteRoom(roomLogId) {
+  const payload = { token: SYNC_TOKEN, kind: 'delete_room', roomLogId, submittedAt: new Date().toISOString() };
+  try { await pushToSheet(payload); clearPending(roomLogId); }
+  catch (e) { queuePending(payload); }
 }
 
 /* ============================================================
