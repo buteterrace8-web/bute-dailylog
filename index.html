@@ -412,11 +412,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;ba
 <!-- ══════════ TROLLEY GUIDE ══════════ -->
 <div id="vTrolley" class="view">
   <div class="ah no-print">
-    <div class="hr"><div><div class="ht">Trolley Loading List</div><div class="hs">Load before you start</div></div><button class="back" onclick="showView('vDash')">Skip →</button></div>
+    <div class="hr"><div><div class="ht">Trolley Loading List</div><div class="hs">Load before you start</div></div><button class="back" onclick="renderDash();showView('vDash')">Skip →</button></div>
   </div>
   <div class="vb" id="trolleyBody"></div>
   <div class="sb no-print" style="display:flex;flex-direction:column;gap:8px">
-    <button class="btn btn-em" onclick="showView('vDash')">✅ Trolley Loaded — Start Cleaning</button>
+    <button class="btn btn-em" onclick="renderDash();showView('vDash')">✅ Trolley Loaded — Start Cleaning</button>
     <button class="btn btn-sl" onclick="window.print()">🖨 Print Trolley List</button>
   </div>
 </div>
