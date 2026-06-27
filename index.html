@@ -346,6 +346,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;ba
         </div>
       </div>
     </div>
+    <div id="resumePicker" style="display:none;border:2px solid var(--em)" class="card">
+      <h3>⏳ Unfinished Session(s) Today</h3>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:6px">It looks like work was already started today on this device. Resume instead of starting fresh to avoid losing progress.</div>
+      <div id="resumeList"></div>
+    </div>
     <div id="prevReports" style="display:none" class="card">
       <h3>Previous Reports</h3><div id="prevList"></div>
     </div>
@@ -821,13 +826,34 @@ function getRoomChipClass(no) {
 
 async function saveRoomDb() {
   try { await store.set('bute-rooms', JSON.stringify(RDB)); } catch(e) {}
+  pushRoomDbToCloud();
+}
+async function pushRoomDbToCloud() {
+  try {
+    await pushToSheet({ token: SYNC_TOKEN, kind: 'roomdb', rooms: RDB, updatedAt: new Date().toISOString() });
+  } catch(e) { /* offline — local copy already saved, will push next time something changes */ }
+}
+async function pullRoomDbFromCloud() {
+  try {
+    if (!SHEET_API_URL || SHEET_API_URL.indexOf('PASTE_YOUR') !== -1) return false;
+    const res = await fetch(`${SHEET_API_URL}?action=roomdb`, { method: 'GET' });
+    const data = await res.json();
+    if (data.ok && data.rooms && Object.keys(data.rooms).length) {
+      RDB = data.rooms;
+      try { await store.set('bute-rooms', JSON.stringify(RDB)); } catch(e) {}
+      return true;
+    }
+  } catch(e) { /* offline or not configured — fall back to local */ }
+  return false;
 }
 async function loadRoomDb() {
+  const gotCloud = await pullRoomDbFromCloud();
+  if (gotCloud) return;
   try {
     const raw = await store.get('bute-rooms');
     if (raw) { RDB = JSON.parse(raw); return; }
   } catch(e) {}
-  // First run — seed with Bute Terrace room data
+  // First run, fully offline, nothing local either — seed with Bute Terrace room data
   ROOMS_SEED.forEach(r => { RDB[r.no] = { type: r.type, bathroom: r.bathroom, floor: r.floor }; });
   await saveRoomDb();
 }
@@ -1185,8 +1211,52 @@ const hkName  = () => S.hk1 + (S.hk2 ? ' & '+S.hk2 : '');
 async function saveState()  { try { await store.set(storeKey(),JSON.stringify(S)); } catch(e) {} }
 function debounceSave() { clearTimeout(_saveTimer); _saveTimer = setTimeout(saveState,800); }
 async function loadToday() {
-  try { const r=await store.get(storeKey(today())); if(r){S=JSON.parse(r);return true;} } catch(e) {}
+  try {
+    const todayPrefix = 'bute-hk-' + today().replace(/-/g,'');
+    let keys = await store.list(todayPrefix);
+    let matches = (keys||[]).filter(k => k.startsWith(todayPrefix));
+    // Night shift crossing midnight: if reloaded after 00:00, today's prefix won't match
+    // a session that was started (and is still using) yesterday's date. Check yesterday
+    // too, and only count it if that session was never closed out (still has active work).
+    const yest = new Date(); yest.setDate(yest.getDate()-1);
+    const yestStr = yest.toISOString().split('T')[0];
+    const yestPrefix = 'bute-hk-' + yestStr.replace(/-/g,'');
+    const yestKeys = await store.list(yestPrefix);
+    const yestMatches = (yestKeys||[]).filter(k => k.startsWith(yestPrefix));
+    for (const k of yestMatches) {
+      try {
+        const raw = await store.get(k);
+        if (!raw) continue;
+        const p = JSON.parse(raw);
+        const hasUnfinished = (p.rooms||[]).some(r => r.status === 'active') || !p.reportGeneratedAt;
+        if (hasUnfinished) matches.push(k);
+      } catch(e) {}
+    }
+    if (!matches.length) return false;
+    if (matches.length === 1) {
+      const raw = await store.get(matches[0]);
+      if (raw) { S = JSON.parse(raw); return true; }
+      return false;
+    }
+    // More than one in-progress session today (shared device, different staff) — let them choose.
+    _resumeCandidates = [];
+    for (const k of matches) {
+      try {
+        const raw = await store.get(k);
+        if (!raw) continue;
+        const p = JSON.parse(raw);
+        const done = (p.rooms||[]).filter(r=>r.status!=='active').length;
+        _resumeCandidates.push({ data:p, hk:(p.hk1||'')+(p.hk2?' & '+p.hk2:''), done, shift:p.shift||'', total:(p.assignedRooms||[]).length||(p.rooms||[]).length });
+      } catch(e) {}
+    }
+    return _resumeCandidates.length ? 'multiple' : false;
+  } catch(e) {}
   return false;
+}
+function pickResumeSession(idx) {
+  S = JSON.parse(JSON.stringify(_resumeCandidates[idx].data));
+  if (S.assignedRooms?.length) { _todayRooms = [...S.assignedRooms]; refreshChips(); }
+  renderDash(); showView('vDash');
 }
 async function loadPrev() {
   const found=[];
@@ -1208,13 +1278,40 @@ async function loadPrev() {
 /* ============================================================
    VIEWS
    ============================================================ */
+let _inRoomView = false;
 function showView(id) {
   try {
     document.querySelectorAll('.view').forEach(v=>v.classList.remove('on'));
     document.getElementById(id).classList.add('on');
     window.scrollTo(0,0);
+    // Phone back-button safety net: entering the room-cleaning screen pushes a checkpoint,
+    // so an accidental back press lands back on the Dashboard (progress already saved)
+    // instead of leaving the page entirely.
+    if (id === 'vRoom' && !_inRoomView) {
+      _inRoomView = true;
+      try { history.pushState({ buteGuard: true }, '', location.href); } catch(e) {}
+    } else if (id !== 'vRoom') {
+      _inRoomView = false;
+    }
   } catch(e) { showErr('Navigation error: '+e.message); }
 }
+window.addEventListener('popstate', function(e) {
+  if (_inRoomView) {
+    _inRoomView = false;
+    try { saveState(); } catch(e) {}
+    renderDash();
+    document.querySelectorAll('.view').forEach(v=>v.classList.remove('on'));
+    document.getElementById('vDash').classList.add('on');
+    toast('Progress saved — back to Dashboard', 'em');
+  }
+});
+window.addEventListener('beforeunload', function(e) {
+  if (S && S.cur > -1 && S.rooms && S.rooms[S.cur] && S.rooms[S.cur].status === 'active') {
+    try { saveState(); } catch(err) {}
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
 function showErr(msg) {
   const el=document.getElementById('setupErr');
   if(el){el.textContent='⚠️ '+msg;el.classList.add('on');}
@@ -1293,14 +1390,24 @@ function refreshChips() {
 }
 
 let _prevData = [];
+let _resumeCandidates = [];
 async function init() {
   try {
     document.getElementById('setupDate').textContent = new Date().toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
     await loadRoomDb();
     const found = await loadToday();
-    if (found && S.date === today()) {
+    if (found === true && S.date === today()) {
       if (S.assignedRooms?.length) { _todayRooms = [...S.assignedRooms]; refreshChips(); }
       renderDash(); showView('vDash'); return;
+    }
+    if (found === 'multiple') {
+      document.getElementById('resumePicker').style.display = 'block';
+      document.getElementById('resumeList').innerHTML = _resumeCandidates.map((c,i) =>
+        `<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--bd)">
+          <div><div style="font-weight:700;font-size:13px;color:var(--navy)">${c.hk||'(no name)'} · ${c.shift}</div><div style="font-size:11px;color:var(--muted)">${c.done}/${c.total} rooms done — unfinished from earlier today</div></div>
+          <button onclick="pickResumeSession(${i})" style="background:var(--em);border:none;color:#fff;border-radius:8px;padding:7px 16px;font-size:12px;font-weight:700;cursor:pointer">Resume →</button>
+        </div>`
+      ).join('');
     }
     const prev = await loadPrev();
     _prevData = prev;
@@ -1325,6 +1432,17 @@ async function startDay() {
   try {
     const hk1 = document.getElementById('hk1').value.trim();
     if (!hk1) { toast('⚠️ Please enter your name', 'am'); return; }
+    const existingKey = 'bute-hk-' + today().replace(/-/g,'') + '-' + hk1.toLowerCase().replace(/\s+/g,'');
+    try {
+      const existingRaw = await store.get(existingKey);
+      if (existingRaw) {
+        const existing = JSON.parse(existingRaw);
+        const doneCount = (existing.rooms||[]).filter(r=>r.status!=='active').length;
+        if (doneCount > 0 && !confirm(`You already have an unfinished session today as ${hk1} (${doneCount} room${doneCount!==1?'s':''} done). Starting fresh will erase it locally — already-synced rooms stay safe in the Sheet either way. Continue with a fresh start?`)) {
+          return;
+        }
+      }
+    } catch(e) {}
     S = {
       date: today(), hk1, hk2: partnerOn ? document.getElementById('hk2').value.trim() : '',
       shift: document.getElementById('shift').value,
@@ -1654,7 +1772,7 @@ async function syncDeleteRoom(roomLogId) {
    REPORT
    ============================================================ */
 function endDay() {
-  try { if(!(S.rooms||[]).length){toast('No rooms logged yet','am');return;} renderReport(); showView('vReport'); autoSyncDaySummary(); }
+  try { if(!(S.rooms||[]).length){toast('No rooms logged yet','am');return;} S.reportGeneratedAt = new Date().toISOString(); saveState(); renderReport(); showView('vReport'); autoSyncDaySummary(); }
   catch(e) { showErr('Report error: '+e.message); }
 }
 function renderReport() {
